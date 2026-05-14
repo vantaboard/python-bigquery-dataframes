@@ -20,11 +20,13 @@ environment, and the project from ``GOOGLE_CLOUD_PROJECT`` / ``GCLOUD_PROJECT``
 / ``EMULATOR_PROJECT_ID`` so they can run against the local BigQuery emulator.
 
 Most snippet tests depend on public tables (for example ``ml_datasets.penguins``)
-that are not present in the go-googlesql emulator catalog; those modules are
-skipped here until the emulator seeds matching fixtures. BigFrames-generated
-SQL may also exceed the emulator parser today, so only ``set_options_test``
-runs as an emulator smoke test; unset ``BIGQUERY_EMULATOR_HOST`` for the full
-snippet suite against GCP.
+that the go-googlesql emulator seeds when ``GOOGLESQL_BOOTSTRAP_EXTENDED_PUBLIC_SAMPLES``
+is set (see ``storage/bootstrap_public_sample.go``). When ``BIGQUERY_EMULATOR_HOST``
+is set, ``conftest.py`` wires anonymous clients and endpoint overrides; tests that
+still need unsupported GCP APIs or BigFrames SQL remain skipped via
+``pytest_collection_modifyitems``. The allowlist runs snippet modules that
+primarily exercise ``bigquery-public-data.ml_datasets.penguins``; unset
+``BIGQUERY_EMULATOR_HOST`` for the full suite on GCP.
 """
 
 from __future__ import annotations
@@ -91,11 +93,21 @@ def _configure_bigframes_for_emulator() -> None:
 
 # Snippet tests that only need tables/APIs the go-googlesql emulator does not
 # provide are skipped when BIGQUERY_EMULATOR_HOST is set (see storage bootstrap).
-# BigFrames issues SQL the emulator may not parse yet; keep a minimal allowlist
-# that avoids executing queries against BigQuery.
+# BigFrames-generated SQL may still exceed the emulator parser for some modules;
+# keep an allowlist of snippet tests that primarily use seeded ``ml_datasets.penguins``.
 _ALLOW_ON_EMULATOR = frozenset(
     {
         "set_options_test.py",
+        "quickstart_test.py",
+        "explore_query_result_test.py",
+        "load_data_from_bigquery_test.py",
+        "pandas_methods_test.py",
+        "regression_model_test.py",
+        "bigquery_modules_test.py",
+        "performance_optimizations_test.py",
+        "linear_regression_tutorial_test.py",
+        "clustering_model_test.py",
+        "udf_test.py",
     }
 )
 
