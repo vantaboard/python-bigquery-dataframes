@@ -78,8 +78,16 @@ def get_pytest_env_vars() -> Dict[str, str]:
 
     # Override the GCLOUD_PROJECT and the alias.
     env_key = TEST_CONFIG["gcloud_project_env"]
-    # This should error out if not set.
-    ret["GOOGLE_CLOUD_PROJECT"] = os.environ[env_key]
+    if os.environ.get("BIGQUERY_EMULATOR_HOST", "").strip():
+        ret["GOOGLE_CLOUD_PROJECT"] = (
+            os.environ.get(env_key)
+            or os.environ.get("GCLOUD_PROJECT")
+            or os.environ.get("EMULATOR_PROJECT_ID")
+            or "dev"
+        )
+    else:
+        # This should error out if not set.
+        ret["GOOGLE_CLOUD_PROJECT"] = os.environ[env_key]
 
     # Apply user supplied envs.
     ret.update(TEST_CONFIG["envs"])

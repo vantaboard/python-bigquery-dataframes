@@ -12,9 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pytest fixtures for ``samples/snippets``.
+
+When ``BIGQUERY_EMULATOR_HOST`` is set (see go-googlesql ``.envrc``), snippet
+tests use ``AnonymousCredentials``, REST and gRPC endpoints from the
+environment, and the project from ``GOOGLE_CLOUD_PROJECT`` / ``GCLOUD_PROJECT``
+/ ``EMULATOR_PROJECT_ID`` so they can run against the local BigQuery emulator.
+
+Most snippet tests depend on public tables (for example ``ml_datasets.penguins``)
+that are not present in the go-googlesql emulator catalog; those modules are
+skipped here until the emulator seeds matching fixtures. BigFrames-generated
+SQL may also exceed the emulator parser today, so only ``set_options_test``
+runs as an emulator smoke test; unset ``BIGQUERY_EMULATOR_HOST`` for the full
+snippet suite against GCP.
+"""
+
+from __future__ import annotations
+
+import os
 from typing import Generator, Iterator
 
+import google.auth.credentials
+import google.api_core.client_options as client_options_lib
 from google.cloud import bigquery, storage
+from google.cloud.bigquery._helpers import BIGQUERY_EMULATOR_HOST
 import pytest
 import test_utils.prefixer
 
@@ -25,6 +46,88 @@ prefixer = test_utils.prefixer.Prefixer(
 )
 
 routine_prefixer = test_utils.prefixer.Prefixer("bigframes", "")
+
+
+def _bigquery_emulator_enabled() -> bool:
+    return bool(os.environ.get(BIGQUERY_EMULATOR_HOST, "").strip())
+
+
+def _emulator_project() -> str:
+    return (
+        os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCLOUD_PROJECT")
+        or os.environ.get("EMULATOR_PROJECT_ID")
+        or "dev"
+    )
+
+
+def _emulator_rest_api_endpoint() -> str:
+    raw = os.environ.get(BIGQUERY_EMULATOR_HOST, "").strip()
+    if raw.startswith(("http://", "https://")):
+        return raw.rstrip("/")
+    return "http://{}".format(raw).rstrip("/")
+
+
+def _grpc_endpoint_from_env() -> str:
+    return os.environ.get("BIGQUERY_STORAGE_GRPC_ENDPOINT", "").strip()
+
+
+def _configure_bigframes_for_emulator() -> None:
+    credentials: google.auth.credentials.Credentials = (
+        google.auth.credentials.AnonymousCredentials()
+    )
+    project = _emulator_project()
+    bpd.options.bigquery.credentials = credentials
+    bpd.options.bigquery.project = project
+    bpd.options.bigquery.skip_bq_connection_check = True
+    overrides: dict[str, str] = {"bqclient": _emulator_rest_api_endpoint()}
+    grpc_host = _grpc_endpoint_from_env()
+    if grpc_host:
+        overrides["bqstoragereadclient"] = grpc_host
+        overrides["bqstoragewriteclient"] = grpc_host
+        overrides["bqconnectionclient"] = grpc_host
+    bpd.options.bigquery.client_endpoints_override = overrides
+
+
+# Snippet tests that only need tables/APIs the go-googlesql emulator does not
+# provide are skipped when BIGQUERY_EMULATOR_HOST is set (see storage bootstrap).
+# BigFrames issues SQL the emulator may not parse yet; keep a minimal allowlist
+# that avoids executing queries against BigQuery.
+_ALLOW_ON_EMULATOR = frozenset(
+    {
+        "set_options_test.py",
+    }
+)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if _bigquery_emulator_enabled():
+        _configure_bigframes_for_emulator()
+    config.addinivalue_line(
+        "markers",
+        "requires_real_gcp: needs live BigQuery public datasets or GCP APIs "
+        "(auto-skipped when "
+        + BIGQUERY_EMULATOR_HOST
+        + " is set)",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if not _bigquery_emulator_enabled():
+        return
+    skip = pytest.mark.skip(
+        reason=(
+            "Snippet needs BigQuery public datasets or APIs not available on the "
+            "go-googlesql emulator. Unset BIGQUERY_EMULATOR_HOST to run against GCP."
+        )
+    )
+    for item in items:
+        try:
+            modname = item.path.name  # type: ignore[attr-defined]
+        except AttributeError:
+            modname = os.path.basename(str(item.fspath))  # type: ignore[attr-defined]
+        if modname not in _ALLOW_ON_EMULATOR:
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -38,12 +141,25 @@ def cleanup_datasets(bigquery_client: bigquery.Client) -> None:
 
 @pytest.fixture(scope="session")
 def bigquery_client() -> bigquery.Client:
-    bigquery_client = bigquery.Client()
-    return bigquery_client
+    if _bigquery_emulator_enabled():
+        credentials: google.auth.credentials.Credentials = (
+            google.auth.credentials.AnonymousCredentials()
+        )
+        project = _emulator_project()
+        opts = client_options_lib.ClientOptions(api_endpoint=_emulator_rest_api_endpoint())
+        return bigquery.Client(
+            credentials=credentials, project=project, client_options=opts
+        )
+    return bigquery.Client()
 
 
 @pytest.fixture(scope="session")
 def storage_client(project_id: str) -> storage.Client:
+    if _bigquery_emulator_enabled():
+        credentials: google.auth.credentials.Credentials = (
+            google.auth.credentials.AnonymousCredentials()
+        )
+        return storage.Client(project=project_id, credentials=credentials)
     return storage.Client(project=project_id)
 
 
@@ -56,6 +172,13 @@ def project_id(bigquery_client: bigquery.Client) -> str:
 def gcs_bucket(storage_client: storage.Client) -> Generator[str, None, None]:
     bucket_name = "bigframes_blob_test_with_data_wipeout"
 
+    if _bigquery_emulator_enabled():
+        bucket = storage_client.bucket(bucket_name)
+        if not bucket.exists():
+            bucket.create()
+        yield bucket_name
+        return
+
     yield bucket_name
 
     bucket = storage_client.get_bucket(bucket_name)
@@ -66,6 +189,13 @@ def gcs_bucket(storage_client: storage.Client) -> Generator[str, None, None]:
 @pytest.fixture(scope="session")
 def gcs_bucket_snippets(storage_client: storage.Client) -> Generator[str, None, None]:
     bucket_name = "bigframes_blob_test_snippet_with_data_wipeout"
+
+    if _bigquery_emulator_enabled():
+        bucket = storage_client.bucket(bucket_name)
+        if not bucket.exists():
+            bucket.create()
+        yield bucket_name
+        return
 
     yield bucket_name
 
@@ -82,6 +212,8 @@ def reset_session() -> None:
     """
     bpd.reset_session()
     bpd.options.bigquery.location = None
+    if _bigquery_emulator_enabled():
+        _configure_bigframes_for_emulator()
 
 
 @pytest.fixture(scope="session")

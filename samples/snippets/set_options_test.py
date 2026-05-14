@@ -15,6 +15,8 @@
 
 def test_bigquery_dataframes_set_options() -> None:
     # Close the session before resetting the options
+    import os
+
     import bigframes.pandas as bpd
 
     bpd.close_session()
@@ -23,7 +25,7 @@ def test_bigquery_dataframes_set_options() -> None:
         # [START bigquery_dataframes_set_options]
         import bigframes.pandas as bpd
 
-        PROJECT_ID = "bigframes-dev"  # @param {type:"string"}
+        PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "bigframes-dev")
         REGION = "US"  # @param {type:"string"}
 
         # Set BigQuery DataFrames options
